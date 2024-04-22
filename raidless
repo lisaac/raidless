@@ -1,0 +1,720 @@
+#!/bin/sh
+
+readonly VERSION="v0.0.1"
+readonly APP='RaidLess'
+readonly SNAPRAIDSHOTS_CONTAINER='.snapraidshots'
+readonly SNAPRAID_OPTIONS_WITH_VAL=''
+readonly SNAPRAID_TEMP_CONF='/tmp/_raidless.conf'
+SNAPRAID_CONF='/etc/snapraid.conf'
+MAX_SNAPRAIDSHOT_SN=0
+NEW_SNAPRAIDSHOT_SN=1
+ALL_NAME_ARRAY=
+DATA_NAME_ARRAY=
+PARITY_NAME_ARRAY=
+DATA_PATH_ARRAY=
+PARITY_PATH_ARRAY=
+CONTENT_PATH_ARRAY=
+ALL_PATH_ARRAY=
+# 去掉 -n 和 --snapraid 后的参数，用于传递给 snapraid
+RAW_ARGS=
+# command 参数
+CMD_ARGS=
+# options 参数
+OPT_ARGS=
+OPT_SN=
+OPT_SNS=
+OPT_FILTER_PATH=
+OPT_DISK_NAME=
+
+set -o nounset
+set -o pipefail
+set -o errexit
+set -o errtrace
+
+get_config() {
+  readonly DATA_NAME_ARRAY="$(cat ${SNAPRAID_CONF} | grep -P "^data\s+[^\s]+\s+[^\s]+$" | awk '{print $2}')"
+  readonly PARITY_NAME_ARRAY="$(cat ${SNAPRAID_CONF} | grep -P "^parity\s+|^[1-6]-parity\s+.+$" | awk '{print $1}')"
+  readonly ALL_NAME_ARRAY="${DATA_NAME_ARRAY} ${PARITY_NAME_ARRAY}"
+  readonly DATA_PATH_ARRAY="$(cat ${SNAPRAID_CONF} | grep -P "^data\s+[^\s]+\s+[^\s]+$" | awk '{gsub("/$","");print $NF}')"
+  readonly PARITY_PATH_ARRAY="$(cat ${SNAPRAID_CONF} | grep -Po "(?<=^parity\s|^[1-6]-parity\s)(.+)$" | awk '{sub(/^\s+/, ""); gsub(/\/[^\/]+$/, ""); print}')"
+  readonly ALL_PATH_ARRAY="${DATA_PATH_ARRAY} ${PARITY_PATH_ARRAY}"
+  readonly CONTENT_PATH_ARRAY="$(cat ${SNAPRAID_CONF} | grep -Po "^content\s+\K.+$")"
+}
+
+error() {
+  printf -- "$APP ERROR: $@\n"
+  return 1
+}
+
+info() {
+  printf -- "$APP INFO: $@\n"
+}
+
+is_number() {
+  case $1 in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# 找到返回位置，没找到返回0，最大只能 255
+get_index_of_array() {
+  local __member=$1
+  shift
+  local __array="$@"
+  local __i=0
+  for __item in $__array; do
+    __i=$((__i+1))
+    if [ "$__item" = "$__member" ]; then
+      return $__i
+    fi
+  done
+  return 0
+}
+
+is_member_of_array() {
+  if get_index_of_array $@ ;then
+    return 1
+  else
+    return 0
+  fi
+}
+
+mod_data_content_snapraid_conf() {
+  info "Modifying data & content snapraid.config.."
+  local _sn=$1
+  # 修改 data 为 snapraidshots 路径，parity 不变
+  local _snapshot_dir="${SNAPRAIDSHOTS_CONTAINER}\/$_sn"
+  # sed '/^data/s/\/$\|$/\/'${_snapshot_dir}'/' ${SNAPRAID_CONF} | sed -E 's|^([0-9]*-)?parity .*/|\0'${_snapshot_dir}'/|' > ${SNAPRAID_TEMP_CONF}
+  # 只修改 data 和 处于 data 中的 content
+  sed '/^data/s/\/$\|$/\/'${_snapshot_dir}'/' "${SNAPRAID_CONF}" | awk -v d="$DATA_PATH_ARRAY" '
+    BEGIN { split(d, paths, " ")} {
+      if ($1 == "content") {
+        for (i in paths) {
+          if (index($2, paths[i]) == 1) {
+            gsub("^" paths[i], paths[i] "/'${SNAPRAIDSHOTS_CONTAINER}/$_sn'", $2)
+            print $0
+            modified = 1
+            break
+          }
+        }
+        if (!modified) {
+            print $0
+        }
+        modified = 0
+      }
+      else {
+          print $0
+      }
+    }' > "${SNAPRAID_TEMP_CONF}"
+  cat "${SNAPRAID_TEMP_CONF}"
+}
+
+mod_data_parity_content_snapraid_conf() {
+  info "Modifying data & parity & contentfile in snapraid.config.."
+  local _sn=$1
+  # 同时修改 data parity content为 snapraidshots 路径
+  local _snapshot_dir="${SNAPRAIDSHOTS_CONTAINER}\/$_sn"
+  # sed '/^data/s/\/$\|$/\/'${_snapshot_dir}'/' ${SNAPRAID_CONF} | sed -E 's|^([0-9]*-)?parity\s+.+/\|content\s+.+/|\0'${_snapshot_dir}'/|' > ${SNAPRAID_TEMP_CONF}
+  sed '/^data/s/\/$\|$/\/'${_snapshot_dir}'/' "${SNAPRAID_CONF}" | sed -E 's|^([0-9]*-)?parity\s*.*/\|content\s*.*/|\0'${_snapshot_dir}'/|' > ${SNAPRAID_TEMP_CONF}
+  cat "${SNAPRAID_TEMP_CONF}"
+}
+
+####### btrfs operations #######
+is_btrfs_subvolume() {
+  __path=$1
+  btrfs subvolume show "${__path}" &> /dev/null
+}
+
+del_btrfs_subvolume() {
+  local _subvolume=$1
+  is_btrfs_subvolume "$_subvolume" && {
+    btrfs subvolume delete "${_subvolume}"
+  }
+}
+
+print_btrfs_snapraidshots_info() {
+  local _path=$1
+  local _index=$2
+  echo -e "\033[1m$(get_array_element "$ALL_NAME_ARRAY" "$_index")\t${_path}:\033[0m"
+  btrfs subv list -oucgst ${_path}/${SNAPRAIDSHOTS_CONTAINER} | awk -v OFS="\t" '{if (NR==1) print "#",$0; else if (NR==2) print "-",$0; else {match($NF, /'${SNAPRAIDSHOTS_CONTAINER}'\/([0-9]+)/,a); print a[1],$0}}'
+  #| awk 'NR<=2{print} {buffer[NR%5]=$0} END{for(i=NR-4;i<=NR;i++) print buffer[i%5]}'
+}
+
+set_btrfs_property() {
+  local _subvolume=$1
+  local _property=$2
+  local _value=$3
+  btrfs property set "${_subvolume}" "${_property}" "${_value}"
+}
+
+create_btrfs_snapshot() {
+  local _path=$1
+  local _snapshot=$2
+  local _readonly=${3-}
+  is_btrfs_subvolume "${_snapshot}" || {
+    rm -fr "${_snapshot}" &> /dev/null || true
+    btrfs subvolume snapshot ${_readonly} "${_path}" "${_snapshot}"
+  }
+}
+
+create_btrfs_subvolume() {
+  local _path=$1
+  is_btrfs_subvolume "${_path}" || {
+    rm -fr "${_path}" &> /dev/null || true
+    btrfs subvolume create "${_path}"
+  }
+}
+
+get_btrfs_sns() {
+  local _path=$1
+  echo $(btrfs subv list -oucgst "${_path}/${SNAPRAIDSHOTS_CONTAINER}" | awk '{if (NR>2) {match($NF, /'${SNAPRAIDSHOTS_CONTAINER}'\/([0-9]+)/,a); print a[1]}}')
+}
+
+get_btrfs_max_sn() {
+  local _path=$1
+  echo $(btrfs subv list -oucgst ${_path}/${SNAPRAIDSHOTS_CONTAINER} | awk 'BEGIN {max = 0} {match($NF, /\/'${SNAPRAIDSHOTS_CONTAINER}'\/([0-9]+)$/,a); if (a[1]>max) max=a[1]; fi} END {print max}')
+}
+
+reflink_cp() {
+  local _cp_para=$1
+  local _source=$2
+  local _dest=$3
+  if [ -d "$_source" ]; then
+    info "cp ${_cp_para} --reflink=always ${_source}/* ${_dest}"
+    cp ${_cp_para} --reflink=always ${_source}/* ${_dest} && return 0 || return 1
+  elif [ -f "$_source" ]; then
+    info "cp ${_cp_para} --reflink=always ${_source} ${_dest}"
+    cp ${_cp_para} --reflink=always ${_source} ${_dest} && return 0 || return 1
+  else
+    info "NO ${_source} exist, please check"
+    return 1
+  fi
+}
+###### end of btrfs operations ######
+
+get_max_sns() {
+  local _path_item=
+  local _max_sn_array=
+  local _num=
+  for _path_item in $ALL_PATH_ARRAY; do
+    _max_sn_array="$_max_sn_array $(get_btrfs_max_sn "$_path_item")"
+  done
+  for _num in $_max_sn_array; do
+    # 比较当前元素与最大值
+    if [ "$_num" -gt "$MAX_SNAPRAIDSHOT_SN" ]; then
+        MAX_SNAPRAIDSHOT_SN="$_num"
+    fi
+  done
+  [ -z MAX_SNAPRAIDSHOT_SN ] && {
+    error "Get MAX SN of snapraidshots error! plese check."
+  }
+  NEW_SNAPRAIDSHOT_SN=$((MAX_SNAPRAIDSHOT_SN+1))
+}
+
+get_array_element() {
+  local __array="$1"
+  local __index="$2"
+  local __i=1
+  local __item
+  for __item in $__array; do
+    [ "$__i" -eq "$__index" ] && {
+      echo "$__item"
+      return
+    }
+    __i=$((__i + 1))
+  done
+  echo ""
+}
+
+print_snapraidshots_infos() {
+  local _path_item=
+  local _i=0
+  for _path_item in $ALL_PATH_ARRAY; do
+    _i=$((_i+1))
+    print_btrfs_snapraidshots_info "$_path_item" "$_i"
+  done
+}
+
+create_parity_snapraidshots() {
+  info "Creating parity snapraidshots.."
+  local _sn=$1
+  local _parity_path_item=
+  for _parity_path_item in $PARITY_PATH_ARRAY; do
+    create_btrfs_snapshot "$_parity_path_item" "${_parity_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" -r
+  done
+}
+
+create_data_snapraidshots() {
+  info "Creating data snapraidshots.."
+  local _sn=$1
+  local _data_path_item=
+  for _data_path_item in $DATA_PATH_ARRAY; do
+    create_btrfs_snapshot "$_data_path_item" "${_data_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}"
+  done
+}
+
+set_data_snapraidshots_readonly() {
+  local _sn=$1
+  local _realonly=$2
+  local _data_path_item=
+  for _data_path_item in $DATA_PATH_ARRAY; do
+    set_btrfs_property "${_data_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" "ro" "${_realonly}"
+  done
+}
+
+# 检查配置文件中的 parity data 是否都是 subvolume，content 是否都在 data/parity 中
+check_snap_config_valid() {
+  local _path_item _content_path_item _is_part_of_data_parity
+  # 检查 data 和 parity 是否是 subvolume.
+  for _path_item in $ALL_PATH_ARRAY; do
+    if echo "$_path_item" | grep -qP '^/.*$' && is_btrfs_subvolume "${_path_item}"; then
+      is_btrfs_subvolume "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}" || {
+        error "Data/Parity path: ${_path_item}, NO snapraidshots container exist, use \`raidless init\` to initialization." || true
+      }
+    else
+      error "Data/Parity path: ${_path_item} is NOT subvolume, please check!" || true
+    fi
+  done
+  # 检查 content 是否都在 data 和 parity 中
+  for _content_path_item in $CONTENT_PATH_ARRAY; do
+    # 判断不为空，是否是绝对路径
+    if echo "$_path_item" | grep -qP '^/.*$'; then
+      _is_part_of_data_parity=false
+      for _path_item in $ALL_PATH_ARRAY; do
+        echo "$_content_path_item" | grep -qP "^$_path_item" && _is_part_of_data_parity=true
+      done
+      $_is_part_of_data_parity || {
+        error "Content file MUST be a part of Data or Parity! , content file: ${_content_path_item} if not a part of Data or Parity, please check!" || true
+      }
+    else
+      error "Content file: ${_content_path_item} if not a valid path, please check!" || true
+    fi
+  done
+}
+
+# 初始化 data 和 parity 的 snapraidshots 容器，存放备份快照
+handle_init() {
+  info "Initializing snapraidshos.."
+  local _path_item=
+  for _path_item in $ALL_PATH_ARRAY; do
+    create_btrfs_subvolume "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}"
+  done
+}
+
+handle_flush() {
+  [ -z "$OPT_SNS" ] && {
+    error "No valid SN(s), please specify SN with -n, exit."
+  }
+
+  local _sn=
+  for _sn in $OPT_SNS; do
+    for _path_item in $ALL_PATH_ARRAY; do
+      del_btrfs_subvolume "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" || true
+    done
+  done
+}
+
+handle_del() {
+  [ -z "$OPT_SN" ] && {
+    error "No valid SN, please specify SN with -n, exit."
+  }
+  local _data_name=$OPT_DISK_NAME
+  if [ -z $_data_name ]; then
+    # 删除指定id所有数据和 parity 的snapraidshot
+    local _path_item=
+    for _path_item in $ALL_PATH_ARRAY; do
+      del_btrfs_subvolume "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}" || true
+    done
+  else
+    # 删除指定id特定数据或 parity 的 snapraidshot
+    local _data_path=
+    if _data_path=$(get_all_path_by_name "${_data_name}"); then
+      del_btrfs_subvolume "${_data_path}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}"
+    else
+      error "Not Found the path by data name: $_data_name, please check."
+    fi
+  fi
+}
+
+cp_snapraid_content_file() {
+# 1. 遍历contern array，查询路径是否是属于某个 data 或 parity
+# 3. 如果是，截取fix path
+# 4. 从最新的snapraidshot中复制到 data 或 parity /fix_path 下
+  info "Copy content files.."
+  local _sn=$1
+  local _content_path_item=
+  local _data_path_item=
+  local _fix_path=
+  for _content_path_item in $CONTENT_PATH_ARRAY; do
+    for _data_path_item in $DATA_PATH_ARRAY; do
+      _fix_path=$(echo "$_content_path_item" | grep -oP "^$_data_path_item\K.*") && {
+        reflink_cp "-p" "${_data_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}${_fix_path}" "${_content_path_item}"
+      }
+    done
+  done
+}
+
+handle_sync() {
+  # 执行步骤：
+  # 0. 执行 snapraid diff 确定是否需要 sync，如果存在 -f 选项，强制 sync
+  # 1. 对 data 创建 可写 snapraidshots
+  # 2. 修改 snapraid.conf中的 data 和 `content` 为 snapraidshots 路径
+  # 3. 执行 snapraid sync 操作
+  # 4. 完成之后，对 parity 创建 只读 snapraidshots
+  # 5. 对之前可些的 data snapraidshots 设置成 read-only
+  info "Handle Sync.."
+  (is_member_of_array '-F' "${OPT_ARGS}" || is_member_of_array '--force-full' "${OPT_ARGS}" ) || {
+    snapraid -c ${SNAPRAID_CONF} diff && {
+      info 'No sync needed, exit!'
+      return 0
+    }
+  }
+
+  local _sn=$NEW_SNAPRAIDSHOT_SN
+  # 传入特定 sn， 只针对特定 sn 进行 sync，用于上此次 sync 退出的情况，如果之前正常退出，加上-n 可能会出现一些问题
+  # [ ! -z $OPT_SN ] && _sn=$OPT_SN
+
+  create_data_snapraidshots ${_sn}
+  mod_data_content_snapraid_conf ${_sn}
+  snapraid -c "${SNAPRAID_TEMP_CONF}" ${OPT_ARGS} sync
+  create_parity_snapraidshots ${_sn}
+  set_data_snapraidshots_readonly ${_sn} "true"
+  cp_snapraid_content_file ${_sn}
+}
+
+get_path_by_name() {
+  local _name=$1
+  local _name_array=$2
+  local _path_array=$3
+  [ -z "$_name" ] && return 1
+  get_index_of_array "${_name}" "${_name_array}" && return 1
+  local _i=$?
+  local _j=0
+  local _path_item=
+  for _path_item in $_path_array; do
+    _j=$((_j+1))
+    if [ "$_i" = "$_j" ]; then
+      echo $_path_item
+      return 0
+    fi
+  done
+  return 1
+}
+
+get_data_path_by_name() {
+  local _data_name=$1
+  local _path=
+  _path=$(get_path_by_name "${_data_name}" "${DATA_NAME_ARRAY}" "${DATA_PATH_ARRAY}") && {
+    echo $_path
+    return 0
+  } || return 1
+}
+
+get_all_path_by_name() {
+  local _data_name=$1
+  local _path=
+  _path=$(get_path_by_name "${_data_name}" "${ALL_NAME_ARRAY}" "${ALL_PATH_ARRAY}") && {
+    echo $_path
+    return 0
+  } || return 1
+}
+
+fix_use_snapshot() {
+  # 支持 -d <data 数据卷>; -m <path>:跳过已有文件，恢复已经删除的文件与snaprraid一致，不加参数直接加路径，即恢复文件
+  local _dest_path=$1
+  local _data_path=$2
+  local _fix_path=$3 # 以数据目录为/，相对子目录
+
+  # 复制前进行 sync，保证数据安全
+  # handle_sync
+  # get_max_sns
+  info "Use SN.$OPT_SN snapraidshots to fix $_dest_path"
+
+  if is_member_of_array '-m' "${OPT_ARGS}" ; then
+      # -m 选项，只回复已经被删除的文件，即：不覆盖从 snapraidshot 中复制
+    reflink_cp "-rpiun" "${_data_path}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}${_fix_path}" "${_dest_path}"
+  else
+    reflink_cp "-rp" "${_data_path}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}${_fix_path}" "${_dest_path}"
+    # 有可能覆盖掉 content file ，使用 max sn 的 snapraidshot 中的 content 恢复
+    cp_snapraid_content_file ${MAX_SNAPRAIDSHOT_SN}
+  fi
+}
+
+# 检测 sn 是否有效: 通过判断遍历非所选 data path 的snapraidshots ，以此检测 sn 是否存在
+check_snapraid_sn_valid() {
+  info "Checking sn valid.."
+  local _data_path=$1
+  local _sn=$2
+  local _sn_array=
+  for _path_item in $ALL_PATH_ARRAY; do
+    [ $_path_item != $_data_path ] && {
+      # 这里是其他的 data 和 parity
+      _sn_array=$(get_btrfs_sns "$_path_item")
+      is_member_of_array "${_sn}" "${_sn_array}" || {
+        # 没有找到相应 SN，显示相应的data/parity路径
+        error "SN.$_sn snapraidshot NOT find in $_path_item, please check,exit!"
+      }
+    }
+  done
+}
+
+fix_use_snapraid() {
+  # --. 判断 data path 是否有效
+  # 0. 根据 data path/name 判断给出的 sn 是否有效（判断其他 sn 对应的 data 及 parity 是否存在）
+  # 1. 根据 data path/name 及 sn 判断对应的 snapraidshot 是否存在，如果存在，解除对应 snapraidshot 中的 ro 属性
+  # 2. 如果不存在，直接对 data path 创建一个 sn 为 <sn> 的 snapraidshot, 同时需要准备一个content
+  # 3. 修改 snapraid.conf ，全部指向 snapraidshots
+  # 4. 执行 fix 操作
+  # 5. 执行 fix use snapshot 操作
+  local _data_name=$1
+  local _data_path=$2
+  local _fix_path=$3 # 以数据目录为/，相对子目录
+  local _path_item=
+
+  # 检查对于的 sn 中的 snapriadshots 是否可用
+  check_snapraid_sn_valid "${_data_path}" "${OPT_SN}"
+  info "Use SN.$_sn SNAPRAID to fix /$_fix_path"
+  # 对目标 snapraidshot 进行检查，如果是 subvolume 开放写属性，
+  local {_dest_subvolume}="${_data_path}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}"
+  if is_btrfs_subvolume "${_dest_subvolume}"; then
+    set_btrfs_property "${_dest_subvolume}" "ro" false
+  else
+    # 不是 subvolume ，删除并则创建 snapshot
+    create_btrfs_snapshot "${_data_path}" "${_dest_subvolume}"
+  fi
+  # 为所有 <sn> 编号的 snapraidshots 开放写权限，主要是为了：snapraid.content.lock
+  for _path_item in $ALL_PATH_ARRAY; do
+    set_btrfs_property "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}" "ro" false
+  done
+  # 修改 snapraid.conf
+  mod_data_parity_content_snapraid_conf ${OPT_SN} && \
+  if is_member_of_array '-d' "${OPT_ARGS}"; then
+    # -d 跟着 data name
+    snapraid -c ${SNAPRAID_TEMP_CONF} fix ${OPT_ARGS} "${_data_name}"
+  else
+    snapraid -c ${SNAPRAID_TEMP_CONF} fix ${OPT_ARGS} "${_fix_path}"
+  fi
+  # 为所有 <sn> 编号的 snapraidshots 关闭写权限
+  for _path_item in $ALL_PATH_ARRAY; do
+    set_btrfs_property "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}" "ro" true
+  done
+}
+
+handle_fix() {
+  # 执行步骤：
+  # 0. 获得 -<sn> 传入的 sn，否则使用最大的sn，并判断 sn 是否有效
+  # 1. 通过给出的目标路径，获得目标 data，以及 fix path（用于目标路径减去subvolume部分，及data目录中 数据部分的路径）
+  # 2. 通过与snapraid中的data进行比较，判断给出的路径是否有效
+  # 3. 在恢复之前，执行一次 sync，确保数据安全性
+  # 4. 如果没有存在 --snapraid 参数，使用 snapraid 阵列恢复
+  # 5. 使用 snapshot 恢复，-m 跳过已经目标目录中已经存在的文件
+  # 6. 使用 reflink cp 相应 snapraidshots 中的文件到目标目录
+  # 7. 恢复 content file，防止 cp 时被修改
+  local _dest_path=$OPT_FILTER_PATH
+  local _data_name=$OPT_DISK_NAME
+  [ -z $_dest_path ] && [ -z $_data_name ] && {
+    error "Please specify a file or directory, exit!"
+  }
+
+  [ -z $OPT_SN ] && OPT_SN=$MAX_SNAPRAIDSHOT_SN
+  ([ $MAX_SNAPRAIDSHOT_SN -le 0 ] || [ $OPT_SN -le 0 ] || [ $OPT_SN -gt $MAX_SNAPRAIDSHOT_SN ]) && {
+    # 如果没有snapraidshots，或者给出的sn>maxsn，错误
+    error "Not valid SN or snapraidshots!, exit!"
+  }
+
+  #处理 -d
+  # is_member_of_array '-d' "$OPT_ARGS" && {
+  [ ! -z $_data_name ] && {
+    _dest_path=$(get_data_path_by_name "${_data_name}") || {
+      error "Not Found the path by data name: $_data_name, please check."
+    }
+  }
+
+  # 处理相对路径
+  echo "$_dest_path" | grep -qP '^[^/]' && {
+    _dest_path="$(realpath $_dest_path)"
+  }
+
+  # 解析 dest 路径
+  local _data_path=
+  local _fix_path= # 以数据目录为/，相对子目录
+  local _data_path_item=
+  for _data_path_item in $DATA_PATH_ARRAY; do
+    _fix_path=$(echo "$_dest_path" | grep -oP "^$_data_path_item\K.*") && {
+      _data_path=$_data_path_item
+      break
+    }
+  done
+
+  ([ -z $_dest_path ] || [ -z $_data_path ] || [ -z $_fix_path ]) && {
+    error "Path Invalid! please check."
+  }
+
+  echo name:"$_data_name". dest:"$_dest_path". datapath:"$_data_path". fix:"$_fix_path"
+  # fix
+  is_member_of_array '--snapraid'  "$OPT_ARGS" && fix_use_snapraid "$_data_name" "$_data_path" "$_fix_path"
+  fix_use_snapshot "$_dest_path" "$_data_path" "$_fix_path"
+}
+
+print_help_info() {
+printf -- "$APP $VERSION by lisaac, https://www.github.com/lisaac/raidless
+Usage: raidless info|int|sync|fix|del|flush [options]
+
+Commands:
+  info   Print the info of the snapraidshots
+  init   
+  sync   Create snapraidshots for array and synchronize the state of the snapraidshots
+  fix    Fix the array from snapraidshots specifying SN, or using 
+         --snapraid from snapraid array
+  del    Delete the snapraidshot through specified SN and array name
+  flush  Delete the snapraid through specified SNs
+
+Options:
+  -n SN       Specify SN for fix, del or flush, flush command support muti SNs: 1,3,7-10
+  --snapraid  Fix the array from snapraid array insteade of from snapraidshots
+"
+}
+
+handle_exe_snapraid() {
+  [ ! -z $OPT_SN ] && {
+    mod_data_content_snapraid_conf ${OPT_SN}
+  }
+  echo snapraid -c "$SNAPRAID_TEMP_CONF" $RAW_ARGS
+}
+
+get_para_sn() {
+  local _paras="$1"
+  local _para _start _end
+  _paras=$(echo "$_paras" | tr ',' ' ')
+  for _para in $_paras; do
+    # 如果参数包含连字符，则表示为范围
+    if echo "$_para" | grep -q '[0-9]\+-[0-9]\+'; then
+      _start=$(echo "$_para" | cut -d'-' -f1)
+      _end=$(echo "$_para" | cut -d'-' -f2)
+      # 生成范围内的数字，并添加到结果字符串中
+      for i in $(seq "$_start" "$_end"); do
+        OPT_SNS="$OPT_SNS $i"
+      done
+    else
+      # 否则直接添加参数到结果字符串中
+      OPT_SNS="$OPT_SNS $_para"
+      OPT_SN="$_para"
+    fi
+  done
+  readonly OPT_SNS
+  readonly OPT_SN
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n)
+        shift
+        [[ $1 =~ [0-9,-]+ ]] || error "SN error, please specify right SN(s), etc: 1,3,5-7"
+        get_para_sn "$1"
+        ;;
+      -c)
+        shift
+        SNAPRAID_CONF="$1";
+        ;;
+      --snapraid)
+        OPT_ARGS="$OPT_ARGS $1"
+        ;;
+      -f|--filter)
+        RAW_ARGS="$RAW_ARGS $1"
+        shift
+        RAW_ARGS="$RAW_ARGS $1"
+        OPT_FILTER_PATH="$1";
+        ;;
+      -d|--filter-disk)
+        RAW_ARGS="$RAW_ARGS $1"
+        shift
+        RAW_ARGS="$RAW_ARGS $1"
+        OPT_DISK_NAME="$1";
+        ;;
+      -i|--import|-p|--plan|-o|--older-than|-l|--log|-S|--start|-B|--count|-L|--error-limit)
+        # 原有带值的 参数 都跳过，区别与 command
+        RAW_ARGS="$RAW_ARGS $1"
+        shift
+        RAW_ARGS="$RAW_ARGS $1"
+        ;;
+      -*)
+        OPT_ARGS="$OPT_ARGS $1"
+        RAW_ARGS="$RAW_ARGS $1"
+        ;;
+      *)
+        RAW_ARGS="$RAW_ARGS $1"
+        CMD_ARGS="$CMD_ARGS $1"
+        ;;
+    esac
+    shift
+  done
+}
+
+
+main() {
+  cmd=${1-}
+  [ -z $cmd ] && error "No raidless command! please check."
+  case "$1" in
+    info)
+      print_snapraidshots_infos
+      ;;
+    init)
+      handle_init
+      ;;
+    del)
+      shift
+      handle_del
+      ;;
+    flush)
+      handle_flush
+      ;;
+    sync)
+      handle_sync
+      ;;
+    fix)
+      # 默认使用 subvolume snapshot 进行恢复
+      # TODO: --snapraid，使用 snapraid 计算并进行恢复
+      # -<SN> 使用编号为：<SN>的 snapshot 进行恢复, 例：-2，使用编号2的 snapshot，如果有多个，使用最大（时间上最后创建）编号，无此参数或大于最大的编号，将使用最大（时间上最后创建）编号
+      shift
+      handle_fix
+      ;;
+    help)
+      print_help_info
+      ;;
+    version|ver)
+      info "$VERSION"
+      ;;
+    *)
+      info "Unknown option: $1"
+      printf -- "ARGS: $RAW_ARGS\n"
+      printf -- "COMMAND: $CMD_ARGS\n"
+      printf -- "OPTIONS: $OPT_ARGS\n"
+      printf -- "SN: $OPT_SN\n"
+      printf -- "SNS: $OPT_SNS\n"
+      handle_exe_snapraid
+      ;;
+  esac
+}
+
+init() {
+  [ ! -f "$SNAPRAID_CONF" ] && {
+    error "NO snapraid config file $SNAPRAID_CONF found, please check."
+  }
+
+  get_config
+  # handle init
+  is_member_of_array "init" $CMD_ARGS && {
+    handle_init
+    info 'Done.'
+    exit 0
+  }
+  check_snap_config_valid
+  get_max_sns
+}
+
+parse_args "$@"
+init
+main $CMD_ARGS
+info 'Done.'
