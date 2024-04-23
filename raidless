@@ -302,35 +302,31 @@ handle_init() {
   done
 }
 
-handle_flush() {
-  [ -z "$OPT_SNS" ] && {
-    error "No valid SN(s), please specify SN with -n, exit."
-  }
-
-  local _sn=
-  for _sn in $OPT_SNS; do
-    for _path_item in $ALL_PATH_ARRAY; do
+del_btrfs_subvolumes() {
+  local _path_item=$1
+  local _sns=$2
+  local _sn 
+  for _sn in $_sns; do
       del_btrfs_subvolume "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" || true
-    done
   done
 }
 
 handle_del() {
-  [ -z "$OPT_SN" ] && {
-    error "No valid SN, please specify SN with -n, exit."
+  [ -z "$OPT_SNS" ] && {
+    error "No valid SN(s), please specify SN with -n, exit."
   }
   local _data_name=$OPT_DISK_NAME
   if [ -z $_data_name ]; then
     # 删除指定id所有数据和 parity 的snapraidshot
     local _path_item=
     for _path_item in $ALL_PATH_ARRAY; do
-      del_btrfs_subvolume "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}" || true
+      del_btrfs_subvolumes "${_path_item}" "${OPT_SNS}"
     done
   else
     # 删除指定id特定数据或 parity 的 snapraidshot
     local _data_path=
     if _data_path=$(get_all_path_by_name "${_data_name}"); then
-      del_btrfs_subvolume "${_data_path}/${SNAPRAIDSHOTS_CONTAINER}/${OPT_SN}"
+      del_btrfs_subvolumes "${_data_path}" "${OPT_SNS}"
     else
       error "Not Found the path by data name: $_data_name, please check."
     fi
@@ -671,11 +667,7 @@ main() {
       handle_init
       ;;
     del)
-      shift
       handle_del
-      ;;
-    flush)
-      handle_flush
       ;;
     sync)
       handle_sync
@@ -684,7 +676,6 @@ main() {
       # 默认使用 subvolume snapshot 进行恢复
       # TODO: --snapraid，使用 snapraid 计算并进行恢复
       # -<SN> 使用编号为：<SN>的 snapshot 进行恢复, 例：-2，使用编号2的 snapshot，如果有多个，使用最大（时间上最后创建）编号，无此参数或大于最大的编号，将使用最大（时间上最后创建）编号
-      shift
       handle_fix
       ;;
     help)
