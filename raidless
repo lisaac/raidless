@@ -1,4 +1,4 @@
-#!/bin/sh
+
 
 readonly VERSION="v0.0.1"
 readonly APP='RaidLess'
@@ -81,7 +81,7 @@ is_member_of_array() {
 }
 
 mod_data_content_snapraid_conf() {
-  info "Modifying data & content snapraid.config.."
+  info "Modifying data & content snapraid.config:\n"
   local _sn=$1
   # 修改 data 为 snapraidshots 路径，parity 不变
   local _snapshot_dir="${SNAPRAIDSHOTS_CONTAINER}\/$_sn"
@@ -111,7 +111,7 @@ mod_data_content_snapraid_conf() {
 }
 
 mod_data_parity_content_snapraid_conf() {
-  info "Modifying data & parity & contentfile in snapraid.config.."
+  info "Modifying data & parity & contentfile in snapraid.config:"
   local _sn=$1
   # 同时修改 data parity content为 snapraidshots 路径
   local _snapshot_dir="${SNAPRAIDSHOTS_CONTAINER}\/$_sn"
@@ -270,10 +270,10 @@ check_snap_config_valid() {
   for _path_item in $ALL_PATH_ARRAY; do
     if echo "$_path_item" | grep -qP '^/.*$' && is_btrfs_subvolume "${_path_item}"; then
       is_btrfs_subvolume "${_path_item}/${SNAPRAIDSHOTS_CONTAINER}" || {
-        error "Data/Parity path: ${_path_item}, NO snapraidshots container exist, use \`raidless init\` to initialization." || true
+        error "Data/Parity path: ${_path_item}, NO snapraidshots container exist, use \`raidless init\` to initialization."
       }
     else
-      error "Data/Parity path: ${_path_item} is NOT subvolume, please check!" || true
+      error "Data/Parity path: ${_path_item} is NOT subvolume, please check!"
     fi
   done
   # 检查 content 是否都在 data 和 parity 中
@@ -285,10 +285,10 @@ check_snap_config_valid() {
         echo "$_content_path_item" | grep -qP "^$_path_item" && _is_part_of_data_parity=true
       done
       $_is_part_of_data_parity || {
-        error "Content file MUST be a part of Data or Parity! , content file: ${_content_path_item} if not a part of Data or Parity, please check!" || true
+        error "Content file MUST be a part of Data or Parity! , content file: ${_content_path_item} if not a part of Data or Parity, please check!"
       }
     else
-      error "Content file: ${_content_path_item} if not a valid path, please check!" || true
+      error "Content file: ${_content_path_item} if not a valid path, please check!"
     fi
   done
 }
@@ -579,10 +579,16 @@ Options:
 }
 
 handle_exe_snapraid() {
+  local _yes=
+  local _snapraid_conf=$SNAPRAID_CONF
   [ ! -z $OPT_SN ] && {
     mod_data_content_snapraid_conf ${OPT_SN}
+    _snapraid_conf=$SNAPRAID_TEMP_CONF
   }
-  echo snapraid -c "$SNAPRAID_TEMP_CONF" $RAW_ARGS
+  echo -en "snapraid -c $_snapraid_conf $RAW_ARGS\nDo you want to execute [y/n]"
+  read -n 1 _yes
+  echo
+  [ $_yes = "y" ] && snapraid -c "$_snapraid_conf" $RAW_ARGS
 }
 
 get_para_sn() {
@@ -654,7 +660,6 @@ parse_args() {
   done
 }
 
-
 main() {
   cmd=${1-}
   [ -z $cmd ] && error "No raidless command! please check."
@@ -689,22 +694,27 @@ main() {
       info "$VERSION"
       ;;
     *)
-      info "Unknown option: $1"
-      printf -- "ARGS: $RAW_ARGS\n"
-      printf -- "COMMAND: $CMD_ARGS\n"
-      printf -- "OPTIONS: $OPT_ARGS\n"
-      printf -- "SN: $OPT_SN\n"
-      printf -- "SNS: $OPT_SNS\n"
+      # info "Unknown option: $1"
+      # printf -- "ARGS: $RAW_ARGS\n"
+      # printf -- "COMMAND: $CMD_ARGS\n"
+      # printf -- "OPTIONS: $OPT_ARGS\n"
+      # printf -- "SN: $OPT_SN\n"
+      # printf -- "SNS: $OPT_SNS\n"
       handle_exe_snapraid
       ;;
   esac
+}
+
+check_env() {
+  command -v btrfs > /dev/null || error 'No btrfs found, please install btrfs-progs.'
+  command -v snapraid > /dev/null || error 'No snapraid found, please install snapraid.'
+  command -v realpath > /dev/null || error 'No realpath found, please install realpath.'
 }
 
 init() {
   [ ! -f "$SNAPRAID_CONF" ] && {
     error "NO snapraid config file $SNAPRAID_CONF found, please check."
   }
-
   get_config
   # handle init
   is_member_of_array "init" $CMD_ARGS && {
@@ -716,6 +726,7 @@ init() {
   get_max_sns
 }
 
+check_env
 parse_args "$@"
 init
 main $CMD_ARGS
