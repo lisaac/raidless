@@ -4,14 +4,14 @@ A script to manage btrfs subvolume snapshot and snapraid.
 
 又一个 `snapraid-btrfs` 脚本，使用 `btrfs` 快照进行 `snapraid`，保证数据可靠性。
 
-`snapraid` 在默认情况下会对多个 `data` 进行校验，计算出校验值，保存到 `parity` 中。想法非常好，但是存在一个问题，例如：你在上一次 `snapraid sync` 修改了一些文件，同时磁盘又不争气的坏掉了，我们可以使用 `snapraid fix` 来进行修复，但是修复会存在一些问题，你在上次 `snapraid sync` 之后已经修改过一些文件，有几率会导致恢复的时候校验出错，所以在这里引入 `btrfs snapshots` 非常有必要。
+`snapraid` 在默认情况下会对多个 `data` 进行校验，计算出校验值，保存到 `parity` 中。想法非常好，但是存在一个问题，例如：你在上一次 `snapraid sync` 修改了一些文件，同时磁盘又不争气的坏掉了，我们可以使用 `snapraid fix` 来进行修复，但是修复会存在一些问题，你在上次 `snapraid sync` 之后已经修改过一些文件，有几率会导致恢复的时候校验出错，所以在这里引入 `btrfs snapshots` 非常有必要。从 snapshot 中恢复文件时，可以使用非常快速且节省空间的 reflink 拷贝方式。
 
 # usage
 
 使用前提：
 
-    - snapraid 配置文件中的所有 `data` 和 `parity` 必须使用 `btrfs` 或 `subvolume`
-    - snapraid 配置文件中的所有 `content` 全部保存在 `data` 或 `pariyt` 内
+  - snapraid 配置文件中的所有 `data` 和 `parity` 必须使用 `btrfs` 或 `subvolume`
+  - snapraid 配置文件中的所有 `content` 全部保存在 `data` 或 `pariyt` 内
 
 ### raidless init
 
@@ -58,16 +58,28 @@ SN      ID      gen     cgen    top level       otime   uuid    path
 - 可以使用 --snapraid 使用 snapraid array 来进行回复，一般用于 快照（磁盘） 损毁的时候，也可以使用 -n 来指定 SN 编号。
 - 支持 -m 只恢复被删除的文件和目录
 ```
-raidless fix -f aa/bb/c -n 2 # 从 SN 编号为 2 的 snapraidshots 恢复（reflink cp）aa/bb/c
-raidless fix -d disk1 -n 3 # 从 SN 编号为 3 的 snapraidshots 恢复（reflink cp）disk
-raidless fix --snapraid -f aa/bb/c -n 2 # 先用 snapraid 恢复 SN 编号为 2 的 snapraidshots 中的 aa/bb/c，再恢复到data中的 aa/bb/c
+# 从 SN 编号为 2 的 snapraidshots 恢复（reflink cp）aa/bb/c
+raidless fix -f aa/bb/c -n 2
+
+# 从 SN 编号为 3 的 snapraidshots 恢复（reflink cp）disk
+raidless fix -d disk1 -n 3
+
+# 先用 snapraid 恢复 SN 编号为 2 的 snapraidshots 中的 aa/bb/c，再恢复到data中的 aa/bb/c
+raidless fix --snapraid -f aa/bb/c -n 2
 ```
 ### raidless del
 ```
-raidless del -n 3 # 删除所有 sn 为 3 的 snapraidshots
-raidless del -d disk1 -n 4 # 删除名字为disk1的 sn 为 4 的 snapraidshots
-raidless del -n 1,2,7-9 # 删除所有 sn 为 1,2,7,8,9 的 snapraidshots
-raidless del -d disk2 -n 1,2,7-9 # 删除名为disk2，sn 为 1,2,7,8,9 的 snapraidshots
+# 删除所有 sn 为 3 的 snapraidshots
+raidless del -n 3
+
+# 删除名字为disk1的 sn 为 4 的 snapraidshots
+raidless del -d disk1 -n 4
+
+# 删除所有 sn 为 1,2,7,8,9 的 snapraidshots
+raidless del -n 1,2,7-9
+
+# 删除名为disk2，sn 为 1,2,7,8,9 的 snapraidshots
+raidless del -d disk2 -n 1,2,7-9 
 ```
 ### 其他 snapriad 命令
 
@@ -81,6 +93,7 @@ raidless del -d disk2 -n 1,2,7-9 # 删除名为disk2，sn 为 1,2,7,8,9 的 snap
 ```
 # 用 zstd 方式给整个 subvolume 重新压缩，建议在操作此步骤之前备份
 btrfs filesystem defragment -r -v -czstd /path/to/subvolume
+
 # 将 subvolume 设置为 zstd 压缩
-btrfs property set -ts /path/to/subvolume compression zstd
+btrfs property set /path/to/subvolume compression zstd
 ```
