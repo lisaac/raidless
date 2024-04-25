@@ -1,4 +1,4 @@
-
+#!/usr/bin/env ash
 
 readonly VERSION="v0.0.1"
 readonly APP='RaidLess'
