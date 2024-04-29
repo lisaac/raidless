@@ -6,6 +6,11 @@ A script to manage btrfs subvolume snapshot and snapraid.
 
 `snapraid` 在默认情况下会对多个 `data` 进行校验，计算出校验值，保存到 `parity` 中。想法非常好，但是存在一个问题，例如：你在上一次 `snapraid sync` 修改了一些文件，同时磁盘又不争气的坏掉了，我们可以使用 `snapraid fix` 来进行修复，但是修复会存在一些问题，你在上次 `snapraid sync` 之后已经修改过一些文件，有几率会导致恢复的时候校验出错，所以在这里引入 `btrfs snapshots` 非常有必要。从 snapshot 中恢复文件时，可以使用非常快速且节省空间的 reflink 拷贝方式。
 
+# Depends
+- btrfs-progs
+- snapraid
+- grep
+
 # usage
 
 使用前提：

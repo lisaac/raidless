@@ -136,7 +136,16 @@ del_btrfs_subvolume() {
 print_btrfs_snapraidshots_info() {
   local _path=$1
   local _index=$2
-  echo -e "\033[1m$(get_array_element "$ALL_NAME_ARRAY" "$_index")\t${_path}:\033[0m"
+  local _name=$(get_array_element "$ALL_NAME_ARRAY" "$_index")
+  local _data_str=
+
+  is_member_of_array "$_name" "$DATA_NAME_ARRAY" && {
+    _data_str="[data]\t"
+  } || {
+    _name="[$_name]"
+  }
+
+  echo -e "\033[1m$_data_str$_name\t${_path}:\033[0m"
   btrfs subv list -oucgst ${_path}/${SNAPRAIDSHOTS_CONTAINER} | awk -v OFS="\t" '{if (NR==1) print "SN",$0; else if (NR==2) print "-",$0; else {match($NF, /'${SNAPRAIDSHOTS_CONTAINER}'\/([0-9]+)/,a); print a[1],$0}}'
   #| awk 'NR<=2{print} {buffer[NR%5]=$0} END{for(i=NR-4;i<=NR;i++) print buffer[i%5]}'
 }
