@@ -1,6 +1,6 @@
 #!/usr/bin/env ash
 
-readonly VERSION="v0.0.1"
+readonly VERSION="v0.0.2"
 readonly APP='RaidLess'
 readonly SNAPRAIDSHOTS_CONTAINER='.snapraidshots'
 readonly SNAPRAID_OPTIONS_WITH_VAL=''
@@ -566,7 +566,7 @@ handle_fix() {
 
 print_help_info() {
 printf -- "$APP $VERSION by lisaac, https://www.github.com/lisaac/raidless
-Usage: raidless info|int|sync|fix|del|flush [options]
+Usage: raidless info|int|sync|fix|del|keepl [options]
 
 Commands:
   info   Print the info of the snapraidshots
@@ -575,10 +575,10 @@ Commands:
   fix    Fix the array from snapraidshots specifying SN, or using 
          --snapraid from snapraid array
   del    Delete the snapraidshot through specified SN and array name
-  flush  Delete the snapraid through specified SNs
+  keepl  Clean up snapraidshots, keeping only the specified number of latest snapraidshots.
 
 Options:
-  -n SN       Specify SN for fix, del or flush, flush command support muti SNs: 1,3,7-10
+  -n SN       Specify SN for fix, del, del command support muti SNs: 1,3,7-10
   --snapraid  Fix the array from snapraid array insteade of from snapraidshots
 "
 }
@@ -665,6 +665,23 @@ parse_args() {
   done
 }
 
+handle_keep_latest() {
+  local _keep_num=${1-}
+  [ -z $_keep_num ] && error 'Please specify the number of snapraidshots you want to keep.'
+
+  local _disk_parity_nums=$(echo ${ALL_NAME_ARRAY} | wc -w)
+  [ -z $_disk_parity_nums ] && error 'No disk(s) and parity found.'
+
+  for _sn in $(print_snapraidshots_infos | grep -Po "^[0-9]+" | sort -k1,1 -rn | uniq -c | grep -Po "(?<=\s"${_disk_parity_nums}"\s).+" | sed "1,${_keep_num}d")
+  do
+    info "Delete snapraidshot SN: $_sn"
+    local _path_item=
+    for _path_item in $ALL_PATH_ARRAY; do
+      del_btrfs_subvolumes "${_path_item}" "${_sn}"
+    done
+  done
+}
+
 main() {
   cmd=${1-}
   [ -z $cmd ] && error "No raidless command! please check."
@@ -686,6 +703,10 @@ main() {
       # TODO: --snapraid，使用 snapraid 计算并进行恢复
       # -<SN> 使用编号为：<SN>的 snapshot 进行恢复, 例：-2，使用编号2的 snapshot，如果有多个，使用最大（时间上最后创建）编号，无此参数或大于最大的编号，将使用最大（时间上最后创建）编号
       handle_fix
+      ;;
+    keepl)
+      shift
+      handle_keep_latest $@
       ;;
     help)
       print_help_info
