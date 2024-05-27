@@ -19,7 +19,7 @@ A script to manage btrfs subvolume snapshot and snapraid.
 使用前提：
 
 - `snapraid` 配置文件中的所有 `data` 和 `parity` 必须使用 `btrfs` 或 `subvolume`
-- `snapraid` 配置文件中的所有 `content` 全部保存在 `data` 或 `pariyt` 内
+- `snapraid` 配置文件中的所有 `content` 全部保存在 `data` 或 `parity` 内
 
 ### raidless help
 ```
