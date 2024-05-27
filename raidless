@@ -80,6 +80,15 @@ is_member_of_array() {
   fi
 }
 
+mod_snapraid_conf() {
+  info "Modifying data/pariyt & content snapraid.config:\n"
+  local _sn=$1
+  # 修改 data 为 snapraidshots 路径，parity 不变
+  local _snapshot_dir="${SNAPRAIDSHOTS_CONTAINER}\/$_sn"
+  sed '/^data/s/\/$\|$/\/'${_snapshot_dir}'/' ${SNAPRAID_CONF} | sed -E 's|^([0-9]*-)?parity .*/|\0'${_snapshot_dir}'/|' | sed -E 's|^content .*/|\0'${_snapshot_dir}'/|' > ${SNAPRAID_TEMP_CONF}
+  cat "${SNAPRAID_TEMP_CONF}"
+}
+
 mod_data_content_snapraid_conf() {
   info "Modifying data & content snapraid.config:\n"
   local _sn=$1
@@ -175,6 +184,18 @@ create_btrfs_subvolume() {
   }
 }
 
+set_btrfs_default_subvolume() {
+  local _path=$1
+  local _subv_id=$2
+  btrfs subvolume set-default ${_subv_id} ${_path}
+}
+
+get_btrfs_subvolume_id_by_sn() {
+  local _path=$1
+  local _sn=$2
+  echo $(btrfs subvolume list ${_path} | grep "${SNAPRAIDSHOTS_CONTAINER}/${_sn}" | grep -oP "^ID\s+\K\d+")
+}
+
 get_btrfs_sns() {
   local _path=$1
   echo $(btrfs subv list -oucgst "${_path}/${SNAPRAIDSHOTS_CONTAINER}" | awk '{if (NR>2) {match($NF, /'${SNAPRAIDSHOTS_CONTAINER}'\/([0-9]+)/,a); print a[1]}}')
@@ -250,7 +271,7 @@ create_parity_snapraidshots() {
   local _sn=$1
   local _parity_path_item=
   for _parity_path_item in $PARITY_PATH_ARRAY; do
-    create_btrfs_snapshot "$_parity_path_item" "${_parity_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" -r
+    create_btrfs_snapshot "$_parity_path_item" "${_parity_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}"
   done
 }
 
@@ -268,6 +289,15 @@ set_data_snapraidshots_readonly() {
   local _realonly=$2
   local _data_path_item=
   for _data_path_item in $DATA_PATH_ARRAY; do
+    set_btrfs_property "${_data_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" "ro" "${_realonly}"
+  done
+}
+
+set_parity_snapraidshots_readonly() {
+  local _sn=$1
+  local _realonly=$2
+  local _data_path_item=
+  for _data_path_item in $PARITY_PATH_ARRAY; do
     set_btrfs_property "${_data_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" "ro" "${_realonly}"
   done
 }
@@ -343,7 +373,7 @@ handle_del() {
 }
 
 cp_snapraid_content_file() {
-# 1. 遍历contern array，查询路径是否是属于某个 data 或 parity
+# 1. 遍历content array，查询路径是否是属于某个 data 或 parity
 # 3. 如果是，截取fix path
 # 4. 从最新的snapraidshot中复制到 data 或 parity /fix_path 下
   info "Copy content files.."
@@ -360,15 +390,32 @@ cp_snapraid_content_file() {
   done
 }
 
+set_parity_default_subvolume() {
+  info "Set parity default subvolume."
+  local _sn=$1
+  local _parity_path_item=
+  for _parity_path_item in $PARITY_PATH_ARRAY; do
+    local _subv_id=$(get_btrfs_subvolume_id_by_sn ${_sn})
+    set_btrfs_default_subvolume "${_parity_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}" "${_subv_id}"
+  done
+}
+
+cp_parity_file() {
+  info "Copy parity & content files.."
+  local _sn=$1
+  local _parity_path_item=
+  local _fix_path=
+  for _parity_path_item in $PARITY_PATH_ARRAY; do
+    _fix_path=$(cat "${SNAPRAID_CONF}" | grep -oP "^parity\s+${_parity_path_item}\K.*")
+    reflink_cp "-p" "${_parity_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}/${_fix_path}" "${_parity_path_item}"
+    _fix_path=$(cat "${SNAPRAID_CONF}" | grep -oP "^content\s+${_parity_path_item}\K.*")
+    reflink_cp "-p" "${_parity_path_item}/${SNAPRAIDSHOTS_CONTAINER}/${_sn}/${_fix_path}" "${_parity_path_item}"
+  done
+}
+
 handle_sync() {
   # 执行步骤：
-  # 0. 执行 snapraid diff 确定是否需要 sync，如果存在 -f 选项，强制 sync
-  # 1. 对 data 创建 可写 snapraidshots
-  # 2. 修改 snapraid.conf中的 data 和 `content` 为 snapraidshots 路径
-  # 3. 执行 snapraid sync 操作
-  # 4. 完成之后，对 parity 创建 只读 snapraidshots
-  # 5. 对之前可些的 data snapraidshots 设置成 read-only
-  # 6. 复制 snapraidshots 中的 content 到 data
+c
 
   info "Handle Sync.."
   (is_member_of_array '-F' "${OPT_ARGS}" || is_member_of_array '--force-full' "${OPT_ARGS}" ) || {
@@ -383,11 +430,15 @@ handle_sync() {
   # [ ! -z $OPT_SN ] && _sn=$OPT_SN
 
   create_data_snapraidshots ${_sn}
-  mod_data_content_snapraid_conf ${_sn}
-  snapraid -c "${SNAPRAID_TEMP_CONF}" ${OPT_ARGS} sync
   create_parity_snapraidshots ${_sn}
+  mod_snapraid_conf  ${_sn}
+  # mod_data_content_snapraid_conf ${_sn}
+  snapraid -c "${SNAPRAID_TEMP_CONF}" ${OPT_ARGS} sync
   set_data_snapraidshots_readonly ${_sn} "true"
+  set_parity_snapraidshots_readonly ${_sn} "true"
   cp_snapraid_content_file ${_sn}
+  cp_parity_file ${_sn}
+  # set_parity_default_subvolume ${_sn}
 }
 
 get_path_by_name() {

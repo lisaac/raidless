@@ -46,14 +46,13 @@ Options:
 ### raidless sync
 
 执行后，raidless 将会执行以下步骤：
-0. 执行 `snapraid diff` 确定是否需要 `sync`，如果存在 `-F` 选项，强制 `sync`
-
-1. 对 `data` 创建可写 `snapraidshots` 快照
-2. 修改 `snapraid.conf` 中的 `data` 和 `content` 为 `snapraidshots` 路径
-3. 执行 `snapraid sync` 操作
-4. 完成之后，对 parity 创建 只读 `snapraidshots` 快照
-5. 对之前可些的 `data snapraidshots` 设置成 `read-only`
-6. 复制 `snapraidshots` 中的 `content` 到 `data`
+ 0. 执行 `snapraid diff` 确定是否需要 `sync`，如果存在 `-f` 选项，强制 `sync`
+ 1. 对 `data/parity` 创建 可写 `snapraidshots`
+ 2. 修改 `snapraid.conf`中的 `data/parity/content` 为 `snapraidshots` 路径
+ 3. 执行 `snapraid sync` 操作
+ 4. 对之前可些的 `data/parity` `snapraidshots` 设置成 `read-only`
+ 5. 复制 `snapraidshots` 中的 `content` 到 `data`
+ 6. 复制 `parity` 目录下的 `snapraidshots/contetnt` 和 `snapraidshots/parity` 到 `parity` 目录
 
 简言之，对数据区创建 `快照` 后再进行 `snapraid sync`，同步完成后，再创建 `parity` `快照`，同一个sync 之内的所有快照，都有同一个 `SN`，以便于今后恢复。
 
