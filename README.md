@@ -46,6 +46,7 @@ Options:
 ### raidless sync
 
 执行后，raidless 将会执行以下步骤：
+
  0. 执行 `snapraid diff` 确定是否需要 `sync`，如果存在 `-f` 选项，强制 `sync`
  1. 对 `data/parity` 创建 可写 `snapraidshots`
  2. 修改 `snapraid.conf`中的 `data/parity/content` 为 `snapraidshots` 路径

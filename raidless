@@ -415,7 +415,13 @@ cp_parity_file() {
 
 handle_sync() {
   # 执行步骤：
-c
+  # 0. 执行 snapraid diff 确定是否需要 sync，如果存在 -f 选项，强制 sync
+  # 1. 对 data/parity 创建 可写 snapraidshots
+  # 2. 修改 snapraid.conf中的 data/parity/content 为 snapraidshots 路径
+  # 3. 执行 snapraid sync 操作
+  # 4. 对之前可些的 data/parity snapraidshots 设置成 read-only
+  # 5. 复制 snapraidshots 中的 content 到 data
+  # 6. 复制 parity 目录下的 snapraidshots/contetnt 和 snapraidshots/parity 到 parity 目录
 
   info "Handle Sync.."
   (is_member_of_array '-F' "${OPT_ARGS}" || is_member_of_array '--force-full' "${OPT_ARGS}" ) || {
